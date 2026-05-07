@@ -1,0 +1,113 @@
+- name: Pre-provision image
+  hosts: default 
+  gather_facts: no
+  become: yes
+  become_method: sudo
+  vars:
+    ansible_sudo_pass: "{{ ansible_ssh_pass }}"
+    ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+    ansible_become_password: server
+    custom_packages:
+      - open-vm-tools
+      - perl
+      - cloud-init
+    pubkeys:
+      - files/lab_admin.pub
+
+  tasks:
+    - name: Create local user
+      user:
+        name: local
+        shell: /bin/bash
+        state: present
+
+    - name: Install admin level pubkeys
+      authorized_key:
+        user: local
+        state: present
+        key: "{{ lookup('file', item) }}"
+      loop: "{{ pubkeys }}"
+
+- name: Register Red Hat Manager
+  hosts: <hostname_1>
+  gather_facts: no
+  become: yes
+  become_method: sudo
+
+  tasks:
+    - name: Register and auto-subscribe to Red Hat Subscription Manager
+      community.general.redhat_subscription:
+        state: present
+        username: "{{ rhel_8_username }}"
+        password: "{{ rhel_8_password }}"
+        auto_attach: yes
+
+- name: Provision image
+  hosts: default
+  gather_facts: no
+  become: yes
+  become_method: sudo
+
+  tasks:
+    - name: Upgrade all packages
+      dnf:
+        name: "*"
+        state: latest
+
+    - name: Install dnf-plugins-core, python3 & git packages
+      dnf:
+        name:
+          - dnf-plugins-core
+          - python3
+          - git
+        state: latest
+
+    - name: Setup disable config for root login, password auth, empty pw's and enable config for public key auth
+      lineinfile:
+        path: "{{ item.path }}"
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        owner: root
+        group: root
+        state: present
+        create: "{{ item.create | default('no') }}"
+        insertbefore: "{{ item.instertbefore | default(omit) }}"
+        validate: "{{ item.validate | default(omit) }}"
+      loop:
+        - path: /etc/ssh/sshd_config
+          regexp: "^PermitRootLogin yes"
+          line: "#PermitRootLogin"
+        - path: /etc/ssh/sshd_config
+          regexp: "^PasswordAuthentication"
+          line: "#PasswordAuthentication"
+        - path: /etc/ssh/sshd_config
+          regexp: "^PermitEmptyPasswords"
+          line: "#PermitEmptyPasswords no"
+        - path: /etc/ssh/sshd_config
+          regexp: "^#PubkeyAuthentication"
+          line: "#PubkeyAuthentication"
+
+    - name: Disable config for root login, password auth, empty pw's and enable config for public key auth
+      blockinfile:
+        block: "{{ item.block }}"
+        path: "{{ item.path }}"
+        insertbefore: BOF
+        validate: "{{ item.validate }}"
+        create: yes
+      loop:
+        - path: /etc/ssh/sshd_config
+          block: |
+            PermitRootLogin no
+            PasswordAuthentication no
+            PermitEmptyPasswords no
+            PubkeyAuthentication yes
+          validate: /usr/sbin/sshd -T -f %s
+        - path: /etc/sudoers.d/local
+          block: |
+            local    ALL = NOPASSWD: ALL
+          validate: /usr/sbin/visudo -cf %s
+    
+    - name: Restart sshd to pick up config changes
+      systemd:
+        state: restarted
+        name: sshd
